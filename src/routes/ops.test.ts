@@ -3,11 +3,20 @@ import request from 'supertest';
 import { createApp } from '../app.js';
 import type { SearchDeps, SearchFetchResponse } from '../search.js';
 
+function streamFrom(s: string): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(s));
+      c.close();
+    },
+  });
+}
+
 function jsonResponse(body: unknown, status = 200): SearchFetchResponse {
   return {
     status,
     headers: { get: () => null },
-    text: async () => JSON.stringify(body),
+    body: streamFrom(JSON.stringify(body)),
   };
 }
 
@@ -53,6 +62,15 @@ describe('POST /ops/search', () => {
     const res = await request(appWithResults()).post('/ops/search').send({ query: 'q', provider: 'nope' });
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('provider_not_configured');
+  });
+
+  it('maps a malformed JSON body to the in-catalog validation_error', async () => {
+    const res = await request(appWithResults())
+      .post('/ops/search')
+      .set('content-type', 'application/json')
+      .send('{ not json');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('validation_error');
   });
 
   it('404s an unknown operation', async () => {

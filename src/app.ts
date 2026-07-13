@@ -40,10 +40,12 @@ export function createApp(options: AppOptions = {}): Express {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-    // Body-parser raise (e.g. payload too large / malformed JSON) carries a status.
+    // Body-parser raise (e.g. payload too large / malformed JSON) carries a
+    // status. Surface it with the in-catalog `validation_error` code so core's
+    // webSearchClient passthrough sees a documented code, not an ad-hoc one.
     const status = (err as { status?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
     if (typeof status === 'number') {
-      res.status(status).json({ error: 'bad_request', message: (err as Error).message });
+      res.status(status).json({ error: 'validation_error', message: (err as Error).message });
       return;
     }
     logger.error('unhandled error', { err: String((err as Error)?.message ?? err).slice(0, 200), path: req.path });

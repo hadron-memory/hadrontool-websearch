@@ -56,7 +56,7 @@ function splitLocale(locale: string | undefined): { lang?: string; region?: stri
 /** Read `obj[key]` as a trimmed string, or '' when absent/non-string. */
 function str(obj: Record<string, unknown>, key: string): string {
   const v = obj[key];
-  return typeof v === 'string' ? v : '';
+  return typeof v === 'string' ? v.trim() : '';
 }
 
 /** Walk `json.a.b` defensively, returning the array at the path or [] otherwise. */

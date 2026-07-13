@@ -2,12 +2,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { performSearch, MAX_COUNT, type SearchDeps, type SearchFetchResponse } from './search.js';
 import { WebsearchToolError } from './errors.js';
 
+function streamFrom(s: string): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode(s));
+      c.close();
+    },
+  });
+}
+
 function fakeResponse(opts: { status?: number; body?: unknown; headers?: Record<string, string> }): SearchFetchResponse {
   const headers = new Map(Object.entries(opts.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+  const bodyStr = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body ?? {});
   return {
     status: opts.status ?? 200,
     headers: { get: (n) => headers.get(n.toLowerCase()) ?? null },
-    text: async () => (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body ?? {})),
+    body: streamFrom(bodyStr),
   };
 }
 
@@ -60,6 +70,26 @@ describe('performSearch', () => {
     const { deps } = depsReturning(fakeResponse({ body: 'this is not json' }));
     const out = await performSearch({ query: 'q' }, deps);
     expect(out.results).toEqual([]);
+  });
+
+  it('refuses a provider redirect rather than following it off the allowlist', async () => {
+    const { deps } = depsReturning(fakeResponse({ status: 302, headers: { location: 'https://evil.example/x' } }));
+    await expect(performSearch({ query: 'q' }, deps)).rejects.toMatchObject({ code: 'upstream_unreachable' });
+  });
+
+  it('drops results whose URL is not an absolute http(s) URL', async () => {
+    const body = {
+      web: {
+        results: [
+          { title: 'ok', url: 'https://ok', description: 'd' },
+          { title: 'js', url: 'javascript:alert(1)', description: 'd' },
+          { title: 'rel', url: '/relative', description: 'd' },
+        ],
+      },
+    };
+    const { deps } = depsReturning(fakeResponse({ body }));
+    const out = await performSearch({ query: 'q' }, deps);
+    expect(out.results.map((r) => r.url)).toEqual(['https://ok']);
   });
 
   it('maps an unknown provider to provider_not_configured', async () => {

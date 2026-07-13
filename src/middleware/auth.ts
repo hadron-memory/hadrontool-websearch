@@ -1,11 +1,13 @@
 import type { NextFunction, Request, Response } from 'express';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
+// Compare via fixed-size SHA-256 digests so the comparison is timing-safe AND
+// leaks nothing about the secret's length (a bare length check on the raw
+// buffers would reveal the token length through an early return).
 function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
 }
 
 /**

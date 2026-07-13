@@ -41,12 +41,12 @@ const USER_AGENT = 'hadrontool-websearch/0.1 (+https://hadronmemory.com)';
 export interface SearchFetchResponse {
   status: number;
   headers: { get(name: string): string | null };
-  text(): Promise<string>;
+  body: ReadableStream<Uint8Array> | null;
 }
 
 export type SearchFetchImpl = (
   url: string,
-  init: { method: string; headers: Record<string, string>; signal: AbortSignal },
+  init: { method: string; headers: Record<string, string>; redirect: 'manual'; signal: AbortSignal },
 ) => Promise<SearchFetchResponse>;
 
 /** The injectable seam — production default below, fakes in tests. */
@@ -55,8 +55,55 @@ export interface SearchDeps {
 }
 
 export const defaultDeps: SearchDeps = {
-  fetchImpl: (url, init) => undiciFetch(url, init) as unknown as Promise<SearchFetchResponse>,
+  fetchImpl: (url, init) =>
+    undiciFetch(url, {
+      method: init.method,
+      headers: init.headers,
+      // Do NOT follow redirects. The guard-free posture rests entirely on the
+      // destination being an allowlisted host; a 30x would send us to an
+      // arbitrary Location off the allowlist. Manual mode returns the 3xx so
+      // performSearch can refuse it (spec cor:web:020:02).
+      redirect: init.redirect,
+      signal: init.signal,
+    }) as unknown as Promise<SearchFetchResponse>,
 };
+
+/**
+ * Read the body under a hard byte cap. A trusted search API never returns a
+ * body this large, so exceeding the cap is an anomaly: we flag it (the caller
+ * rejects) rather than parse a truncated JSON, and we never buffer past the
+ * budget — closing the OOM window that `res.text()` on a Content-Length-less /
+ * chunked response would leave open. An abort surfaces as a reader rejection.
+ */
+async function readCapped(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+  if (!body) return { text: '', truncated: false };
+  const reader = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let text = '';
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return { text: '', truncated: true };
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  return { text, truncated: false };
+}
+
+/** A result reference is only usable if it is an absolute http(s) URL. */
+function isHttpUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 export interface SearchRequest {
   provider?: string;
@@ -100,7 +147,7 @@ export async function performSearch(req: SearchRequest, deps: SearchDeps = defau
   try {
     let res: SearchFetchResponse;
     try {
-      res = await deps.fetchImpl(url, { method: 'GET', headers, signal: controller.signal });
+      res = await deps.fetchImpl(url, { method: 'GET', headers, redirect: 'manual', signal: controller.signal });
     } catch (err) {
       if (controller.signal.aborted) throw new UpstreamTimeoutError(adapter.slug, SEARCH_TIMEOUT_MS / 1000);
       throw new UpstreamUnreachableError(adapter.slug, String((err as Error)?.message ?? err));
@@ -108,6 +155,12 @@ export async function performSearch(req: SearchRequest, deps: SearchDeps = defau
 
     // Classify by status before reading the body.
     const status = res.status;
+    if (status >= 300 && status < 400) {
+      // The provider tried to redirect off its fixed endpoint. Following it
+      // would leave the allowlist — the one thing the guard-free egress must
+      // never do — so we refuse rather than chase the Location.
+      throw new UpstreamUnreachableError(adapter.slug, 'provider attempted a redirect off the fixed endpoint');
+    }
     if (status === 401 || status === 403) throw new ProviderUnauthorizedError(adapter.slug);
     if (status === 429) {
       const ra = parseInt(res.headers.get('retry-after') ?? '', 10);
@@ -121,26 +174,29 @@ export async function performSearch(req: SearchRequest, deps: SearchDeps = defau
       throw new UpstreamUnreachableError(adapter.slug, 'response too large');
     }
 
-    let text: string;
+    let read: { text: string; truncated: boolean };
     try {
-      text = await res.text();
+      read = await readCapped(res.body, MAX_RESPONSE_BYTES);
     } catch (err) {
       if (controller.signal.aborted) throw new UpstreamTimeoutError(adapter.slug, SEARCH_TIMEOUT_MS / 1000);
       throw new UpstreamUnreachableError(adapter.slug, 'failed reading the provider response');
     }
-    if (text.length > MAX_RESPONSE_BYTES) throw new UpstreamUnreachableError(adapter.slug, 'response too large');
+    if (read.truncated) throw new UpstreamUnreachableError(adapter.slug, 'response too large');
 
     // Untrusted provider output: malformed JSON or an unexpected shape degrades
     // to no results rather than throwing (spec cor:web:020:00, degrade-never-crash).
     let raw: RawResult[] = [];
     try {
-      raw = adapter.parse(JSON.parse(text));
+      raw = adapter.parse(JSON.parse(read.text));
     } catch {
       raw = [];
     }
 
     const results: SearchResult[] = raw
-      .filter((r) => r.url) // a reference without a URL is not usable
+      // A reference is only usable if it is an absolute http(s) URL — drop
+      // relative URLs and dangerous schemes (javascript:/data:/file:) a
+      // provider might return.
+      .filter((r) => isHttpUrl(r.url))
       .slice(0, count)
       .map((r, i) => ({ title: r.title, url: r.url, snippet: r.snippet, rank: i + 1 }));
 
