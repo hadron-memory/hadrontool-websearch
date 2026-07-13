@@ -1,0 +1,35 @@
+{
+  "name": "@hadron/hadrontool-websearch",
+  "version": "0.1.0",
+  "description": "Hadron websearch tool — stateless microservice that queries an external search provider from a fixed allowlist and returns a normalized, versioned result envelope (web-search@1).",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "express": "^4.21.0",
+    "undici": "^7.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.0.0",
+    "@types/supertest": "^6.0.2",
+    "@vitest/coverage-v8": "^4.0.18",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.18"
+  }
+}
